@@ -1,0 +1,47 @@
+---
+title: "市場インデックス比較"
+format: html
+---
+
+## インデックス時系列
+
+<div id="chart" style="width:100%;height:500px;"></div>
+
+<!-- Plotly.js の読み込み -->
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+<script>
+const symbols = ["^GSPC","^DJI","^IXIC"];
+const apiKey  = "YOUR_API_KEY";  // Alpha Vantage APIキーを設定
+
+async function fetchTimeSeries(symbol){
+  const url =
+    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED`
+    + `&symbol=${encodeURIComponent(symbol)}`
+    + `&apikey=${apiKey}`;
+  const res  = await fetch(url);
+  const json = await res.json();
+  return json["Time Series (Daily)"];
+}
+
+async function drawChart(){
+  const allData = await Promise.all(symbols.map(s => fetchTimeSeries(s)));
+  const traces = allData.map((ts, i) => {
+    const dates = Object.keys(ts).reverse();
+    const prices = dates.map(d => +ts[d]["5. adjusted close"]);
+    return {
+      x: dates,
+      y: prices,
+      name: symbols[i],
+      mode: "lines"
+    };
+  });
+  Plotly.newPlot("chart", traces, {
+    title: "主要市場インデックスの推移",
+    xaxis: { title: "日付" },
+    yaxis: { title: "株価（調整済終値）" }
+  });
+}
+
+drawChart();
+</script> 

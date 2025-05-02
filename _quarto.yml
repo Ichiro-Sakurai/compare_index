@@ -1,0 +1,9 @@
+project:
+  type: website
+  output-dir: docs      # GitHub Pagesで/docs配下を公開する
+site:
+  title: "市場インデックス比較"
+format:
+  html:
+    embed-resources: true
+    theme: cosmo 
