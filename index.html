@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>市場インデックス比較</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    #chart-container { width: 100%; height: 500px; }
+  </style>
+</head>
+<body>
+  <h1>市場インデックス比較</h1>
+  <h2>オルカンvsSP500</h2>
+  <div id="controls" style="margin-bottom:20px;">
+    <label>開始日: <input type="date" id="ref-date"></label>
+    <label style="margin-left:10px;">基準日: <input type="date" id="csv-base-date"></label>
+    <label style="margin-left:10px;">終了日: <input type="date" id="end-date"></label>
+    <button id="update-btn" style="margin-left:10px;">更新</button>
+  </div>
+  <div id="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
+  <div id="csv-note" style="margin-top:8px; font-size:0.9em; color:#666;"></div>
+  <h2>市場インデックスチャート (SP500 & NASDAQ)</h2>
+  <div id="yahoo-controls" style="margin-bottom:20px;">
+    <label>開始日: <input type="date" id="yahoo-ref-date"></label>
+    <label style="margin-left:10px;">基準日: <input type="date" id="yahoo-base-date"></label>
+    <label style="margin-left:10px;">終了日: <input type="date" id="yahoo-end-date"></label>
+    <button id="yahoo-update-btn" style="margin-left:10px;">更新</button>
+  </div>
+  <div id="yahoo-loading" style="margin-top:8px; font-size:0.9em; color:#666;"></div>
+  <div id="yahoo-chart-container" style="width:100%;height:500px; margin-top:20px;">
+    <canvas id="yahoo-chart"></canvas>
+  </div>
+  <script>
+    // CSVチャート用ラベル
+    const csvLabels = [
+      "eMAXIS Slim全世界株式(オール･カントリー)",
+      "eMAXIS Slim米国株式(S&P500)"
+    ];
+    const symbols = ["0331418A", "03311187"];
+
+    const csvUrls = {
+      fundA: "data/253425.csv",
+      fundB: "data/253266.csv"
+    };
+
+    // 日次調整済終値の時系列を取得 (Yahoo Finance API)
+    async function fetchTS(sym) {
+      // Yahoo Finance API取得 (CORSプロキシフォールバック付き)
+      const startDateInput = document.getElementById('yahoo-ref-date').value;
+      const endDate = document.getElementById('yahoo-end-date').value;
+      const startTs = Math.floor(new Date(startDateInput).getTime() / 1000);
+      const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+      const baseUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}`
+                    + `?period1=${startTs}&period2=${endTs}&interval=1d`;
+      const proxies = [
+        'https://api.allorigins.win/raw?url=',
+        'https://thingproxy.freeboard.io/fetch/'
+      ];
+      let json;
+      for (const p of proxies) {
+        try {
+          console.log(`fetchTS: trying proxy ${p}`);
+          const res = await fetch(p + encodeURIComponent(baseUrl));
+          if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+          json = await res.json();
+          break;
+        } catch(err) {
+          console.warn(`fetchTS proxy ${p} failed:`, err);
+        }
+      }
+      if (!json) {
+        console.error(`fetchTS all proxies failed for ${sym}`);
+        return {};
+      }
+      console.log(`fetchTS ${sym} →`, json);
+      if (!json.chart || !json.chart.result || !json.chart.result.length) {
+        console.error(`Yahoo API エラー for ${sym}:`, json);
+        return {};
+      }
+      const result = json.chart.result[0];
+      const timestamps = result.timestamp;
+      const adjclose = result.indicators?.adjclose?.[0]?.adjclose || [];
+      const dataMap = {};
+      timestamps.forEach((ts, idx) => {
+        const date = new Date(ts * 1000).toISOString().slice(0,10);
+        dataMap[date] = adjclose[idx];
+      });
+      return dataMap;
+    }
+
+    let chartCsvInstance;
+    let chartYahooInstance;
+    
+    // CSVチャート更新ボタン
+    document.getElementById('update-btn').addEventListener('click', drawCsv);
+    // Yahooチャート更新ボタン
+    document.getElementById('yahoo-update-btn').addEventListener('click', drawYahoo);
+
+    // 初期設定：日付入力にデフォルト値セット後にチャート描画
+    async function init() {
+      // CSVデータを一度取得し、日付範囲を決定
+      const [dataA, dataB] = await Promise.all([
+        fetchCSVData(csvUrls.fundA),
+        fetchCSVData(csvUrls.fundB)
+      ]);
+      // 利用可能な日付リストを抽出・ソート
+      let dates = [...new Set([...Object.keys(dataA), ...Object.keys(dataB)])];
+      dates.sort();
+      // CSVチャート 開始日・終了日にデフォルト値設定
+      document.getElementById('ref-date').value = dates[0];
+      document.getElementById('csv-base-date').value = dates[0];
+      document.getElementById('end-date').value = dates[dates.length - 1];
+      // CSVチャートの最大日付を下部に表示
+      document.getElementById('csv-note').innerText = 'データは ' + dates[dates.length - 1] + ' まで';
+      // Yahooチャート用の開始日・終了日に同じデフォルト値設定
+      document.getElementById('yahoo-ref-date').value = dates[0];
+      document.getElementById('yahoo-base-date').value = dates[0];
+      document.getElementById('yahoo-end-date').value = dates[dates.length - 1];
+      // 初回チャート描画
+      await drawCsv();
+      await drawYahoo();
+    }
+    init();
+
+    async function drawCsv() {
+      // CSVチャート用の期間・基準日を取得
+      const startDate = document.getElementById('ref-date').value;
+      const baseDateInput = document.getElementById('csv-base-date').value;
+      const endDate = document.getElementById('end-date').value;
+      // 両ファンドを並列取得
+      const [dataA, dataB] = await Promise.all([
+        fetchCSVData(csvUrls.fundA),
+        fetchCSVData(csvUrls.fundB)
+      ]);
+      console.log('drawCsv fetched data lengths:', Object.keys(dataA).length, Object.keys(dataB).length);
+      // デバッグ: 取得したデータ内容をログ出力
+      console.log('デバッグ dataA keys:', Object.keys(dataA).slice(0,5), '… total', Object.keys(dataA).length);
+      console.log('デバッグ dataB keys:', Object.keys(dataB).slice(0,5), '… total', Object.keys(dataB).length);
+      const rawArr    = [dataA, dataB];
+      const firstValid = rawArr.find(o => Object.keys(o).length);
+      if (!firstValid) {
+        document.getElementById("chart-container").innerText =
+          "CSVデータ取得に失敗しました。";
+        return;
+      }
+      // 日付リストを取得→期間でフィルタ→昇順ソート
+      let dates = Object.keys(firstValid);
+      if (startDate) {
+        dates = dates.filter(d => d >= startDate && (!endDate || d <= endDate));
+      }
+      dates.sort();
+      console.log('drawCsv filtered dates count:', dates.length, dates[0], 'to', dates[dates.length-1]);
+      const colors = ["#ff6384","#36a2eb"];
+      const datasets = rawArr.map((ts,i) => {
+        // 抽出値
+        let values = dates.map(d => ts[d]);
+        // 指定日から最初にマッチする日を基準日にして100で正規化
+        if (baseDateInput) {
+          const baseDate = dates.find(d => ts[d] != null && d >= baseDateInput);
+          if (baseDate) {
+            const base = ts[baseDate];
+            values = values.map(v => v / base * 100);
+          }
+        }
+        return {
+          label: csvLabels[i],
+          data: values,
+          borderColor: colors[i],
+          fill: false,
+          tension: 0.1
+        };
+      });
+      console.log('drawCsv datasets sample:', datasets.map(ds=>ds.data.slice(0,3)));
+
+      // 既存チャートを破棄して再描画
+      if (chartCsvInstance) chartCsvInstance.destroy();
+      chartCsvInstance = new Chart(
+        document.getElementById("chart").getContext("2d"),
+        {
+          type: "line",
+          data: { labels: dates, datasets },
+          options: { scales: { y: { title: { display: true, text: '基準値 (基準日=100)' } } } }
+        }
+      );
+    }
+
+    // チャート描画 (Yahoo Finance データ用)
+    async function drawYahoo() {
+      // ロード中メッセージ表示
+      document.getElementById('yahoo-loading').innerText = 'データ取得中...';
+      // Yahooチャート用の期間・基準日を取得
+      const startDate = document.getElementById('yahoo-ref-date').value;
+      const baseDateInput = document.getElementById('yahoo-base-date').value;
+      const endDate = document.getElementById('yahoo-end-date').value;
+      // Yahooチャート用シンボルとラベル
+      const yahooSymbols = ["^GSPC","^IXIC"];  // SP500 と NASDAQ
+      const yahooLabels  = ["S&P500","NASDAQ"];
+      const rawArr = await Promise.all(yahooSymbols.map(fetchTS));
+      console.log('drawYahoo fetched rawArr lengths:', rawArr.map(r=>Object.keys(r).length));
+      console.log('Yahoo rawArr:', rawArr);
+      const firstValid = rawArr.find(ts => Object.keys(ts).length > 0);
+      if (!firstValid) {
+        // ロード中メッセージクリア
+        document.getElementById('yahoo-loading').innerText = '';
+        document.getElementById("yahoo-chart-container").innerText =
+          "Yahooデータ取得に失敗しました。Consoleを確認してください";
+        return;
+      }
+      // 日付リストを取得→期間でフィルタ→昇順ソート
+      let dates = Object.keys(firstValid);
+      if (startDate) {
+        dates = dates.filter(d => d >= startDate && (!endDate || d <= endDate));
+      }
+      dates.sort();
+      console.log('drawYahoo filtered dates count:', dates.length, dates[0], 'to', dates[dates.length-1]);
+      const colors = ["#4e79a7","#e15759"];
+      const datasets = rawArr.map((ts,i) => {
+        // 抽出値
+        let values = dates.map(d => ts[d]);
+        // 指定日から最初にマッチする日を基準日にして100で正規化
+        if (baseDateInput) {
+          const baseDate = dates.find(d => ts[d] != null && d >= baseDateInput);
+          if (baseDate) {
+            const base = ts[baseDate];
+            values = values.map(v => v / base * 100);
+          }
+        }
+        return {
+          label: yahooLabels[i],
+          data: values,
+          borderColor: colors[i],
+          fill: false,
+          tension: 0.1
+        };
+      }).filter(d => d);
+      console.log('drawYahoo datasets sample:', datasets.map(ds=>ds.data.slice(0,3)));
+      
+      // 既存チャートを破棄して再描画
+      if (chartYahooInstance) chartYahooInstance.destroy();
+      chartYahooInstance = new Chart(
+        document.getElementById("yahoo-chart").getContext("2d"),
+        {
+          type: "line",
+          data: { labels: dates, datasets },
+          options: { scales: { y: { title: { display: true, text: '相対値 (基準日=100)' } } } }
+        }
+      );
+      // ロード中メッセージクリア
+      document.getElementById('yahoo-loading').innerText = '';
+    }
+
+    async function fetchCSVData(url) {
+      // ローカルCSVをフェッチし、Shift_JISをUTF-8にデコード
+      const res = await fetch(url);
+      const buffer = await res.arrayBuffer();
+      const text = new TextDecoder('shift_jis').decode(buffer);
+      // PapaParseで2行ヘッダー付きのCSVをパース（ヘッダー行は自動取得せず、全行を配列として取得）
+      const parsed = Papa.parse(text, { header: false, skipEmptyLines: true });
+      // ヘッダー2行をスキップしてデータ行を取得
+      const rows = parsed.data;
+      const dataRows = rows.slice(2);  // 0:説明行,1:カラム名行を除外
+      const dataMap = {};
+      dataRows.forEach(row => {
+        const rawDate = row[0];     // 日付は列0
+        const rawNav  = row[1];     // NAVは列1
+        if (!rawDate || rawNav == null) return;
+        const date = rawDate.replace(/\//g, '-');
+        dataMap[date] = rawNav;
+      });
+      return dataMap;
+    }
+  </script>
+</body>
+</html> 
